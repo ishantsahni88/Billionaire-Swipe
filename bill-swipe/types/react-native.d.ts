@@ -19,7 +19,16 @@ declare module 'react-native' {
   export interface ViewProps { style?: any; accessible?: boolean; accessibilityLabel?: string; accessibilityRole?: string; accessibilityValue?: any; accessibilityViewIsModal?: boolean; children?: React.ReactNode; onLayout?: (e: any) => void; testID?: string; }
   export const View: React.FC<ViewProps>;
   export const Text: React.FC<ViewProps & { numberOfLines?: number; onPress?: () => void }>;
-  export interface PressableProps extends ViewProps { onPress?: () => void; disabled?: boolean; accessibilityState?: any; hitSlop?: number | { top?: number; bottom?: number; left?: number; right?: number }; }
+  export interface PressableStateCallbackType { pressed: boolean }
+  export type StyleProp<T> = T | T[] | false | null | undefined;
+  export interface PressableProps extends ViewProps {
+    onPress?: () => void;
+    onLongPress?: () => void;
+    disabled?: boolean;
+    accessibilityState?: any;
+    hitSlop?: number | { top?: number; bottom?: number; left?: number; right?: number };
+    style?: StyleProp<any> | ((state: PressableStateCallbackType) => StyleProp<any>);
+  }
   export const Pressable: React.FC<PressableProps>;
   /** Deprecated in real RN but still widely used; declared as an alias of PressableProps. */
   export const TouchableOpacity: React.FC<PressableProps & { activeOpacity?: number }>;

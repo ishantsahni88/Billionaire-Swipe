@@ -54,44 +54,55 @@ export function ThankYouScreen({ cfg, paymentId }: ThankYouScreenProps) {
     );
   }
 
+  const locked = !text.trim() || state === 'sending' || state === 'duplicate';
+
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>Say thanks — anonymously</Text>
-        <Text style={styles.muted}>
-          Your donor never sees your name or address. You can send one short note.
+      <Text style={styles.muted}>
+        Your donor never sees your name or address. You can send one short note.
+      </Text>
+
+      <TextInput
+        value={text}
+        onChangeText={(t: string) => {
+          if (state === 'editing' || state === 'blocked' || state === 'failed') {
+            setText(t.slice(0, MAX_THANK_YOU_CHARS));
+          }
+        }}
+        multiline
+        maxLength={MAX_THANK_YOU_CHARS}
+        placeholder="A few words about what this meant…"
+        placeholderTextColor={palette.accentPass}
+        style={styles.input}
+        accessibilityLabel={`Thank-you message, ${remaining} characters remaining`}
+        editable={state !== 'sending' && state !== 'duplicate'}
+      />
+      <Text style={[styles.counter, remaining < 40 ? styles.counterWarn : null]}>{remaining}</Text>
+
+      {(state === 'blocked' || state === 'duplicate' || state === 'failed') && (
+        <Text accessibilityRole="alert" style={styles.error}>
+          {state === 'blocked' &&
+            'This note was held by our safety review. Please avoid contact details, links, or payment requests.'}
+          {state === 'duplicate' && 'A thank-you has already been sent for this bill.'}
+          {state === 'failed' && 'Something went wrong. Your note was not lost — please try again.'}
         </Text>
+      )}
 
-        <TextInput
-          value={text}
-          onChangeText={(t) => state === 'editing' && setText(t.slice(0, MAX_THANK_YOU_CHARS))}
-          multiline
-          maxLength={MAX_THANK_YOU_CHARS}
-          placeholder="A few words about what this meant…"
-          placeholderTextColor={palette.accentPass}
-          style={styles.input}
-          accessibilityLabel={`Thank-you message, ${remaining} characters remaining`}
-          editable={state !== 'sending'}
-        />
-        <Text style={[styles.counter, remaining < 40 ? styles.counterWarn : null]}>{remaining}</Text>
-
-        {(state === 'blocked' || state === 'duplicate' || state === 'failed') && (
-          <Text accessibilityRole="alert" style={styles.error}>
-            {state === 'blocked' &&
-              'This note was held by our safety review. Please avoid contact details, links, or payment requests.'}
-            {state === 'duplicate' && 'A thank-you has already been sent for this bill.'}
-            {state === 'failed' && 'Something went wrong. Your note was not lost — please try again.'}
-          </Text>
-        )}
-
-        <Pressable
-          onPress={send}
-          disabled={!text.trim() || state === 'sending' || state === 'duplicate'}
-          accessibilityRole="button"
-          accessibilityLabel="Send thank-you note"
-          style={(!text.trim() || state === 'sending' || state === 'duplicate') ? styles.sendBtnDisabled : styles.sendBtn}
-        >
-          <Text style={styles.sendBtnText}>{state === 'sending' ? 'Sending…' : 'Send note'}</Text>
-        </Pressable>
+      <Pressable
+        onPress={send}
+        disabled={locked}
+        accessibilityRole="button"
+        accessibilityLabel="Send thank-you note"
+        // Function-form style needs the RN callback type; ambient stub types it
+        // loosely, so annotate explicitly to stay strict-mode clean.
+        style={(state: { pressed: boolean }) => [
+          locked ? styles.sendBtnDisabled : styles.sendBtn,
+          state.pressed ? styles.sendBtnPressed : null,
+        ]}
+      >
+        <Text style={styles.sendBtnText}>{state === 'sending' ? 'Sending…' : 'Send note'}</Text>
+      </Pressable>
     </View>
   );
 }
