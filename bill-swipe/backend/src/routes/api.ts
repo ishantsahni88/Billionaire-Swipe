@@ -15,23 +15,39 @@ import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { moderateText, MAX_THANK_YOU_CHARS } from '@bill-swipe/shared';
 import type { PublicBillCard } from '@bill-swipe/shared';
-import { buildFeed, UNDO_WINDOW_MS } from '../services/feed';
-import { fundBill, InsufficientBalanceError, PartnerGateway } from '../services/payments';
+import { buildFeed, UNDO_WINDOW_MS, canUndo, type SwipeRecord } from '../services/feed';
+import { fundBill, InsufficientBalanceError, PartnerGateway, type PaymentLedgerRow } from '../services/payments';
 import { AnalyticsTracker } from '../services/analytics';
+import { canPay, type KycStatus } from '../services/auth';
+import { buildDashboard, renderReceiptPdf } from '../services/dashboard';
+import { openDispute, reversePayment, republishDeadline } from '../services/disputes';
 
 export interface AppDeps {
   db: {
     /** returns payer-facing projections ONLY (fail-closed shape) */
     feedPool(): Promise<PublicBillCard[]>;
-    swipes(payerId: string): Promise<{ payerId: string; billId: string; action: 'pay' | 'pass' | 'save'; createdAt: number }[]>;
+    swipes(payerId: string): Promise<SwipeRecord[]>;
     getBill(id: string): Promise<{ id: string; amountCents: number; fundedCents: number; status: string; category: string } | null>;
     insertPayment(row: unknown): Promise<void>;
     saveThankYou(paymentId: string, body: string, moderation: string): Promise<void>;
     pauseBill(billId: string): Promise<void>;
+    /** Feature 7: ledger rows for one payer (drives dashboard + receipts) */
+    paymentsForPayer(payerId: string): Promise<PaymentLedgerRow[]>;
+    getPayment(id: string): Promise<PaymentLedgerRow | null>;
+    /** ops lookup so the dashboard can label categories without leaking biller names */
+    billCategory(billId: string): string | undefined;
+    /** swipe lookup for undo */
+    getSwipe(id: string): Promise<SwipeRecord | null>;
+    removeSwipe(swipe: SwipeRecord): Promise<void>;
+    /** disputes: persist an opened dispute case */
+    insertDispute(dispute: unknown): Promise<void>;
+    updatePayment(row: PaymentLedgerRow): Promise<void>;
   };
   gateway: PartnerGateway;
   tracker: AnalyticsTracker;
   paymentsLegallyApproved: boolean; // env PAYMENTS_LEGALLY_APPROVED
+  /** Compliance § Payer KYC: payers must be screened before paying. */
+  kycOf(userId: string): KycStatus;
 }
 
 const FeeSchema = { platformFeeCents: 99 } as const;
@@ -78,6 +94,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // ---- Feature 4: quote & pay ---------------------------------------------
   app.post('/v1/bills/:id/quote', async (req, reply) => {
     if (!deps.paymentsLegallyApproved) return denyHold(reply);
+    const payerId = (req as any).user?.id;
+    if (!payerId || !canPay(deps.kycOf(payerId))) {
+      return reply.code(403).send({ code: 'FORBIDDEN', message: 'payer KYC required before payment' }); // Compliance § Payer KYC
+    }
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const bill = await deps.db.getBill(id);
     if (!bill) return reply.code(404).send({ code: 'NOT_FOUND', message: 'bill' });
@@ -94,6 +114,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   app.post('/v1/payments', async (req, reply) => {
     if (!deps.paymentsLegallyApproved) return denyHold(reply); // gating item, enforced in code
+    const payerId = (req as any).user?.id;
+    if (!payerId || !canPay(deps.kycOf(payerId))) {
+      return reply.code(403).send({ code: 'FORBIDDEN', message: 'payer KYC required before payment' });
+    }
     const body = z
       .object({ billId: z.string().uuid(), amountCents: z.number().int().positive() })
       .parse(req.body);
@@ -140,6 +164,92 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     await deps.db.pauseBill(id);
     deps.tracker.track('report_submitted', (req as any).user?.id, { bill_id: id });
     return reply.code(202).send({ paused: true, reviewSla: 'P2B' }); // 2 business days (Flow 4)
+  });
+
+  // ---- Feature 3: undo last swipe (strict 5s window) -----------------------
+  app.post('/v1/swipes/:id/undo', async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(req.params);
+    const swipe = await deps.db.getSwipe(id);
+    if (!swipe) return reply.code(404).send({ code: 'NOT_FOUND', message: 'swipe' });
+    if (!canUndo(swipe, Date.now())) {
+      return reply.code(409).send({ code: 'VALIDATION', message: 'undo window expired' });
+    }
+    await deps.db.removeSwipe(swipe);
+    return { undone: true };
+  });
+
+  // ---- Feature 7: payer dashboard ------------------------------------------
+  app.get('/v1/payer/dashboard', async (req, reply) => {
+    const payerId = (req as any).user?.id;
+    if (!payerId) return reply.code(403).send({ code: 'FORBIDDEN', message: 'sign-in required' });
+    const rows = await deps.db.paymentsForPayer(payerId);
+    return buildDashboard(rows, (billId) => deps.db.billCategory(billId));
+  });
+
+  // ---- Feature 7: PDF receipt (only to its own payer; no PII inside) -------
+  app.get('/v1/receipts/:paymentId.pdf', async (req, reply) => {
+    const { paymentId } = z.object({ paymentId: z.string().uuid() }).parse(req.params);
+    const payerId = (req as any).user?.id;
+    if (!payerId) return reply.code(403).send({ code: 'FORBIDDEN', message: 'sign-in required' });
+    const row = await deps.db.getPayment(paymentId);
+    // 404 (not 403) for other payers' receipts — don't confirm existence.
+    if (!row || row.payerId !== payerId) return reply.code(404).send({ code: 'NOT_FOUND', message: 'receipt' });
+    const bill = await deps.db.getBill(row.billId);
+    const pdf = renderReceiptPdf({
+      payerHandle: (req as any).user?.handle ?? 'Anonymous donor',
+      billerLabel: CATEGORY_LABEL[bill?.category ?? 'other'] ?? 'Bill',
+      amountCents: row.amountCents,
+      feeCents: row.feeCents,
+      totalCents: row.amountCents + row.feeCents,
+      confirmationNumber: row.billerConfirmation ?? row.partnerTxnId ?? row.id,
+      paidAt: row.createdAt,
+    });
+    return reply.type('application/pdf').send(Buffer.from(pdf));
+  });
+
+  // ---- User Flow 4: dispute opens a case; refunds route through partner ----
+  app.post('/v1/disputes', async (req, reply) => {
+    const body = z
+      .object({
+        billId: z.string().uuid(),
+        paymentId: z.string().uuid().optional(),
+        type: z.enum(['wrong_biller', 'bill_already_paid', 'scam', 'charged_wrong_amount', 'other']),
+      })
+      .parse(req.body);
+    const reporterRole = (req as any).user?.role === 'holder' ? 'holder' : 'payer';
+    const dispute = openDispute({
+      id: crypto.randomUUID(),
+      paymentId: body.paymentId,
+      billId: body.billId,
+      reporterRole,
+      type: body.type,
+      openedAt: Date.now(),
+    });
+    await deps.db.pauseBill(body.billId); // reports pause immediately (Content & Fraud Controls)
+    await deps.db.insertDispute(dispute);
+    deps.tracker.track('dispute_opened', (req as any).user?.id, { payment_id: body.paymentId, dispute_type: body.type });
+    return reply.code(202).send({ id: dispute.id, state: dispute.state, dueBy: new Date(dispute.dueBy).toISOString() });
+  });
+
+  // Ops-only resolution endpoint: refund goes back THROUGH the licensed partner.
+  app.post('/v1/disputes/:id/refund', async (req, reply) => {
+    if ((req as any).user?.role !== 'ops') return reply.code(403).send({ code: 'FORBIDDEN', message: 'ops only' });
+    const { paymentId } = z.object({ paymentId: z.string().uuid() }).parse(req.body);
+    const row = await deps.db.getPayment(paymentId);
+    if (!row) return reply.code(404).send({ code: 'NOT_FOUND', message: 'payment' });
+    try {
+      await reversePayment({
+        payment: row,
+        to: 'reversed',
+        partnerRefund: (txn) => deps.gateway.refund(txn),
+        persist: (r) => deps.db.updatePayment(r),
+        allowConfirmedRefund: true, // partner dispute/refund capability (see disputes.ts note)
+      });
+    } catch (e) {
+      return reply.code(409).send({ code: 'VALIDATION', message: (e as Error).message });
+    }
+    // Feature 4 AC: reversed bills republish within 1 hour — schedule the job.
+    return reply.code(200).send({ reversed: true, republishBy: new Date(republishDeadline(Date.now())).toISOString() });
   });
 
   return app;

@@ -67,8 +67,6 @@ export function renderReceiptPdf(d: ReceiptData): Uint8Array {
     'licensed payment partner. Bill Swipe did not hold these funds.',
     'Not a tax receipt. (Tax receipts are out of scope for MVP.)',
   ];
-  const stream = lines.map((l) => `BT /F1 11 Tf 50 ${760 - lines.length * 4 + 760 * 0} Td (${escapePdf(l)}) Tj ET`).join('\n');
-  // Simpler: place each line individually.
   const content = lines
     .map((l, i) => `BT /F1 11 Tf 1 0 0 1 50 ${760 - i * 18} Tm (${escapePdf(l)}) Tj ET`)
     .join('\n');
@@ -91,7 +89,6 @@ export function renderReceiptPdf(d: ReceiptData): Uint8Array {
   for (const off of offsets) pdf += `${String(off).padStart(10, '0')} 00000 n \n`;
   pdf += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
 
-  void stream;
   return new TextEncoder().encode(pdf);
 }
 
