@@ -111,7 +111,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // violations are CLIENT faults -> 400 VALIDATION; unexpected internal
   // failures stay 500. Endpoints that need bespoke codes (403/404/409/503)
   // send replies directly and never reach this handler.
-  app.setErrorHandler((err, _req, reply) => {
+  app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
     if (err instanceof z.ZodError) {
       return reply.code(400).send({ code: 'VALIDATION', message: err.issues[0]?.message ?? 'invalid request' });
     }
