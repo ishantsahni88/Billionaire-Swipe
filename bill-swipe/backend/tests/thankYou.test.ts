@@ -63,11 +63,16 @@ describe('Feature 6 — thank-you relay', () => {
     }
   });
 
-  it('delivered records are immutable to further verdicts', () => {
+  it('resolved records are immutable to further verdicts (exactly one verdict per note)', () => {
     const { record } = composeThankYou({ paymentId: 'p', body: 'Warm thanks.', nowMs: NOW });
-    const delivered = markDelivered(record);
+    const approved = applyModerationVerdict(record, true); // pending -> approved
+    expect(approved.state).toBe('approved');
+    // MVP rule: one message per payment => one verdict. Re-verdicting a
+    // RESOLVED record throws rather than silently flipping delivery.
+    expect(() => applyModerationVerdict(approved, false)).toThrow(/already resolved/);
+    const delivered = markDelivered(approved);
     expect(delivered.state).toBe('delivered');
-    expect(applyModerationVerdict(delivered, false).state).toBe('delivered');
+    expect(() => applyModerationVerdict(delivered, false)).toThrow(/already resolved/);
   });
 
   it('payer view carries no identity fields (Feature 5)', () => {

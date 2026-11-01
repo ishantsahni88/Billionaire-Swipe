@@ -68,12 +68,13 @@ export function composeThankYou(opts: {
   return { record, moderationHits: mod.hits.map((h) => h.rule) };
 }
 
-/**
- * Ops/automated review verdict on a `pending` message. Rejected messages stop
- * here — they are never delivered.
- */
+/** Ops verdict on a thank-you record. MVP rule: one message per payment, so
+ *  every pending note must receive exactly ONE verdict — resolved records are
+ *  immutable (re-verdicting throws instead of silently flipping delivery). */
 export function applyModerationVerdict(record: ThankYouRecord, approve: boolean): ThankYouRecord {
-  if (record.state === 'delivered') return record; // immutable once sent
+  if (record.state !== 'pending') {
+    throw new Error(`thank-you already resolved (state: ${record.state})`);
+  }
   return { ...record, state: approve ? 'approved' : 'rejected' };
 }
 

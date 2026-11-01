@@ -107,6 +107,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const otpChallenges = new Map<string, { ch: ReturnType<typeof createChallenge>; salt: string }>();
   app.register(rateLimit, { max: 100, timeWindow: '1 minute' }); // PRD: rate limiting on all endpoints
 
+  // Uniform error envelope. Validation errors (zod) and moderation-rule
+  // violations are CLIENT faults -> 400 VALIDATION; unexpected internal
+  // failures stay 500. Endpoints that need bespoke codes (403/404/409/503)
+  // send replies directly and never reach this handler.
+  app.setErrorHandler((err, _req, reply) => {
+    if (err instanceof z.ZodError) {
+      return reply.code(400).send({ code: 'VALIDATION', message: err.issues[0]?.message ?? 'invalid request' });
+    }
+    if (err instanceof DuplicateThankYouError || err instanceof EmptyMessageError) {
+      return reply.code(400).send({ code: 'VALIDATION', message: err.message });
+    }
+    if (/already resolved|cannot deliver from state/.test(err.message)) {
+      return reply.code(409).send({ code: 'VALIDATION', message: err.message });
+    }
+    const status = typeof (err as any).statusCode === 'number' ? (err as any).statusCode : 500;
+    return reply.code(status).send({ code: status >= 500 ? 'INTERNAL' : 'VALIDATION', message: err.message });
+  });
+
   const denyHold = (reply: any) =>
     reply.code(503).send({ code: 'LEGAL_HOLD', message: 'Payments are disabled pending legal sign-off on the payment structure.' });
 

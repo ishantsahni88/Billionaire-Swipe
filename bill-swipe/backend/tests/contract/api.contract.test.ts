@@ -36,7 +36,10 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
   const payments = new Map<string, PaymentLedgerRow>();
   const swipes = new Map<string, SwipeRecord & { id: string }>();
   const disputes: Dispute[] = [];
-  const thankYous: { paymentId: string; body: string }[] = [];
+  // Full Feature 6 records so the ops moderation-queue seam works end-to-end.
+  type TyRec = { id: string; paymentId: string; body: string; state: 'pending' | 'approved' | 'rejected' | 'delivered'; createdAtMs: number; deliverByMs: number };
+  const thankYous: TyRec[] = [];
+  let tySeq = 0;
   let swipeSeq = 0;
   const deps: AppDeps & { __payments: typeof payments; __swipes: typeof swipes; __disputes: typeof disputes; __addSwipe: (s: SwipeRecord) => string } = {
     paymentsLegallyApproved,
@@ -51,8 +54,18 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
         return { id, amountCents: 24_050, fundedCents: 0, status: 'published', category: 'utility' };
       },
       async insertPayment(row) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
-      async saveThankYou(paymentId: string, body: string) { thankYous.push({ paymentId, body }); },
+      async saveThankYou(paymentId: string, body: string, moderation: string) {
+        const now = Date.now();
+        thankYous.push({ id: `ty-${++tySeq}`, paymentId, body, state: moderation as TyRec['state'], createdAtMs: now, deliverByMs: now + 3_600_000 });
+      },
       async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
+      async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },
+      async setThankYouState(id: string, state: TyRec['state']) {
+        const rec = thankYous.find((t) => t.id === id && t.state === 'pending');
+        if (!rec) return null;
+        rec.state = state;
+        return rec;
+      },
       async pauseBill() {},
       async paymentsForPayer(payerId) { return [...payments.values()].filter((p) => p.payerId === payerId); },
       async getPayment(id) { return payments.get(id) ?? null; },
@@ -172,6 +185,104 @@ describe('API contract — Feature 6 thank-you moderation', () => {
     });
     expect(res.json()).toMatchObject({ status: 'queued', deliverWithin: 'PT1H' });
     await app.close();
+  });
+
+  it('clean messages skip the queue; soft-flagged ones land in ops pending queue', async () => {
+    const app = buildApp(makeDeps(true));
+    asUser(app, { id: 'holder-1' });
+    asOps(app); // later hook wins — mirrors a real auth layer resolving role per request
+    const clean = await app.inject({
+      method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`,
+      payload: { body: 'The lights are back on. Thank you.' },
+    });
+    expect(clean.statusCode).toBe(200);
+    expect(clean.json().queuedForModeration).toBe(false);
+
+    // One soft 'flag' hit (numbered street address) -> allowed but state
+    // 'pending': borderline notes need an ops verdict before delivery.
+    const flagged = await app.inject({
+      method: 'POST', url: `/v1/payments/33333333-3333-4333-8333-333333333333/thankyou`,
+      payload: { body: 'We made it through the winter at 42 Elm Street together.' },
+    });
+    expect(flagged.statusCode).toBe(200);
+    expect(flagged.json().queuedForModeration).toBe(true);
+
+    const q2 = await app.inject({ method: 'GET', url: '/v1/ops/thankyou/pending' });
+    expect(q2.statusCode).toBe(200);
+    const items = q2.json();
+    expect(items.length).toBe(1);
+    expect(items[0].body).toContain('42 Elm Street');
+    // Identity-safe projection: no holder fields in the queue response.
+    for (const forbidden of ['holder', 'name', 'email', 'phone', 'address']) {
+      expect(Object.keys(items[0]).join(',').toLowerCase()).not.toContain(forbidden);
+    }
+    await app.close();
+  });
+});
+
+/** Add an ops-role user hook (later hooks override earlier req.user). */
+function asOps(app: ReturnType<typeof buildApp>) {
+  app.addHook('onRequest', async (req) => { (req as any).user = { id: 'ops-1', role: 'ops' }; });
+}
+
+describe('API contract — Feature 6 ops moderation verdicts', () => {
+  const appWithOps = () => {
+    const app = buildApp(makeDeps(true));
+    asOps(app);
+    return app;
+  };
+
+  /** Send a soft-flagged message and return its queue id. */
+  async function seedPending(app: ReturnType<typeof buildApp>): Promise<string> {
+    const send = await app.inject({
+      method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`,
+      payload: { body: 'Warmth returned to our home at 17 Maple Drive.' },
+    });
+    expect(send.json().queuedForModeration).toBe(true);
+    const q = await app.inject({ method: 'GET', url: '/v1/ops/thankyou/pending' });
+    return q.json()[0].id;
+  }
+
+  it('approve moves pending -> approved', async () => {
+    const app = appWithOps();
+    const id = await seedPending(app);
+    const v = await app.inject({ method: 'POST', url: `/v1/ops/thankyou/${id}/verdict`, payload: { approve: true } });
+    expect(v.statusCode).toBe(200);
+    expect(v.json()).toEqual({ id, state: 'approved' });
+    const q = await app.inject({ method: 'GET', url: '/v1/ops/thankyou/pending' });
+    expect(q.json().length).toBe(0); // cleared from queue
+    await app.close();
+  });
+
+  it('reject moves pending -> rejected and blocks delivery', async () => {
+    const app = appWithOps();
+    const id = await seedPending(app);
+    const v = await app.inject({ method: 'POST', url: `/v1/ops/thankyou/${id}/verdict`, payload: { approve: false } });
+    expect(v.json().state).toBe('rejected');
+    await app.close();
+  });
+
+  it('double verdict is rejected with 409 (resolved records immutable)', async () => {
+    const app = appWithOps();
+    const id = await seedPending(app);
+    await app.inject({ method: 'POST', url: `/v1/ops/thankyou/${id}/verdict`, payload: { approve: true } });
+    const again = await app.inject({ method: 'POST', url: `/v1/ops/thankyou/${id}/verdict`, payload: { approve: false } });
+    expect(again.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it('unknown id returns 404; non-ops callers get 403', async () => {
+    const app = appWithOps();
+    const missing = await app.inject({
+      method: 'POST', url: '/v1/ops/thankyou/99999999-9999-4999-8999-999999999999/verdict',
+      payload: { approve: true },
+    });
+    expect(missing.statusCode).toBe(404);
+    const plain = buildApp(makeDeps(true));
+    asUser(plain, { id: 'payer-x' });
+    const denied = await plain.inject({ method: 'GET', url: '/v1/ops/thankyou/pending' });
+    expect(denied.statusCode).toBe(403);
+    await app.close(); await plain.close();
   });
 });
 
