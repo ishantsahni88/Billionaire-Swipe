@@ -61,7 +61,7 @@ const styles = StyleSheet.create({
     padding: layout.pagePaddingHorizontal,
     maxWidth: 320,
     alignSelf: 'flex-end',
-    marginVertical: motion.microMs, // subtle rhythm; no animation gimmicks
+    marginVertical: motion.micro / 10, // subtle rhythm; no animation gimmicks
   },
   body: {
     fontSize: typography.scale.body,

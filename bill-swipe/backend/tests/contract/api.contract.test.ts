@@ -36,6 +36,7 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
   const payments = new Map<string, PaymentLedgerRow>();
   const swipes = new Map<string, SwipeRecord & { id: string }>();
   const disputes: Dispute[] = [];
+  const thankYous: { paymentId: string; body: string }[] = [];
   let swipeSeq = 0;
   const deps: AppDeps & { __payments: typeof payments; __swipes: typeof swipes; __disputes: typeof disputes; __addSwipe: (s: SwipeRecord) => string } = {
     paymentsLegallyApproved,
@@ -50,7 +51,8 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
         return { id, amountCents: 24_050, fundedCents: 0, status: 'published', category: 'utility' };
       },
       async insertPayment(row) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
-      async saveThankYou() {},
+      async saveThankYou(paymentId: string, body: string) { thankYous.push({ paymentId, body }); },
+      async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
       async pauseBill() {},
       async paymentsForPayer(payerId) { return [...payments.values()].filter((p) => p.payerId === payerId); },
       async getPayment(id) { return payments.get(id) ?? null; },
@@ -135,6 +137,40 @@ describe('API contract — Feature 6 thank-you moderation', () => {
       expect(res.statusCode).toBe(400);
       expect(res.json().message).toContain('moderation');
     }
+    await app.close();
+  });
+
+  it('rejects empty messages with 400 VALIDATION', async () => {
+    const app = appWith();
+    const res = await app.inject({ method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`, payload: { body: '   ' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('VALIDATION');
+    await app.close();
+  });
+
+  it('enforces one thank-you per payment — second attempt is 409 (no replies in MVP)', async () => {
+    const app = appWith();
+    const first = await app.inject({
+      method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`,
+      payload: { body: 'You kept our heat on this winter. Thank you.' },
+    });
+    expect(first.statusCode).toBe(200);
+    const second = await app.inject({
+      method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`,
+      payload: { body: 'One more thing...' },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().message).toContain('one thank-you');
+    await app.close();
+  });
+
+  it('delivery SLA is PT1H (Feature 6 AC: within 1 hour of confirmation)', async () => {
+    const app = appWith();
+    const res = await app.inject({
+      method: 'POST', url: `/v1/payments/${PAYMENT_ID}/thankyou`,
+      payload: { body: 'Grateful — phone is back on.' },
+    });
+    expect(res.json()).toMatchObject({ status: 'queued', deliverWithin: 'PT1H' });
     await app.close();
   });
 });

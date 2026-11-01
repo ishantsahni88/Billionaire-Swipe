@@ -43,6 +43,7 @@ function memoryDb(seedFeed: PublicBillCard[] = []) {
     },
     async insertPayment(row: unknown) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
     async saveThankYou(paymentId: string, body: string, moderation: string) { thankYous.push({ paymentId, body, moderation }); },
+    async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
     async pauseBill(billId: string) { paused.add(billId); },
     async paymentsForPayer(payerId: string) { return [...payments.values()].filter((p) => p.payerId === payerId); },
     async getPayment(id: string) { return payments.get(id) ?? null; },

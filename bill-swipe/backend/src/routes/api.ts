@@ -13,7 +13,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
-import { moderateText, MAX_THANK_YOU_CHARS } from '@bill-swipe/shared';
+import { MAX_THANK_YOU_CHARS } from '@bill-swipe/shared';
 import type { PublicBillCard, BillStatus } from '@bill-swipe/shared';
 import { buildFeed, UNDO_WINDOW_MS, canUndo, type SwipeRecord } from '../services/feed';
 
@@ -34,6 +34,7 @@ export function uploadStageToBillStatus(stage: UploadStage): BillStatus {
   }
 }
 import { fundBill, InsufficientBalanceError, PartnerGateway, type PaymentLedgerRow } from '../services/payments';
+import { composeThankYou, DuplicateThankYouError, EmptyMessageError, DELIVERY_SLA_MS } from '../services/thankYou';
 import { AnalyticsTracker } from '../services/analytics';
 import { canPay, createChallenge, verifyOtp, generateOtpCode, isOfAge, type KycStatus } from '../services/auth';
 import { buildDashboard, renderReceiptPdf } from '../services/dashboard';
@@ -54,6 +55,8 @@ export interface AppDeps {
     getBill(id: string): Promise<{ id: string; amountCents: number; fundedCents: number; status: string; category: string } | null>;
     insertPayment(row: unknown): Promise<void>;
     saveThankYou(paymentId: string, body: string, moderation: string): Promise<void>;
+    /** Feature 6 duplicate rule needs prior messages for the payment (optional so old fakes stay valid) */
+    thankYousForPayment?(paymentId: string): Promise<{ paymentId: string; body: string }[]>;
     pauseBill(billId: string): Promise<void>;
     /** Feature 7: ledger rows for one payer (drives dashboard + receipts) */
     paymentsForPayer(payerId: string): Promise<PaymentLedgerRow[]>;
@@ -378,16 +381,40 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   // ---- Feature 6: thank-you relay -----------------------------------------
+  // Full rules live in services/thankYou.ts (one per payment, <=280 chars,
+  // moderation-before-delivery, 1h SLA, anonymous sender). Route delegates.
   app.post('/v1/payments/:id/thankyou', async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { body } = z.object({ body: z.string().max(MAX_THANK_YOU_CHARS) }).parse(req.body);
-    const mod = moderateText(body);
-    if (!mod.allowed) {
-      return reply.code(400).send({ code: 'VALIDATION', message: 'message blocked by moderation', hits: mod.hits.map((h) => h.rule) });
+    const prior = (await deps.db.thankYousForPayment?.(id)) ?? [];
+    let composed: ReturnType<typeof composeThankYou>;
+    try {
+      composed = composeThankYou({
+        paymentId: id,
+        body,
+        existingForPayment: prior.map((p) => ({
+          id: 'prior', paymentId: p.paymentId, body: p.body,
+          state: 'approved' as const, createdAtMs: 0, deliverByMs: 0,
+        })),
+        nowMs: Date.now(),
+      });
+    } catch (e) {
+      if (e instanceof DuplicateThankYouError) {
+        return reply.code(409).send({ code: 'VALIDATION', message: e.message });
+      }
+      if (e instanceof EmptyMessageError) {
+        return reply.code(400).send({ code: 'VALIDATION', message: e.message });
+      }
+      return reply.code(400).send({ code: 'VALIDATION', message: (e as Error).message });
     }
-    await deps.db.saveThankYou(id, body, mod.hits.length ? 'pending_review' : 'approved');
-    deps.tracker.track('thank_you_sent', (req as any).user?.id, { char_count: body.length });
-    return { status: 'queued', deliverWithin: 'PT1H' }; // AC: delivered within 1 hour
+    const { record, moderationHits } = composed;
+    if (record.state === 'rejected') {
+      // Blocked by moderation — never stored for delivery (Feature 6 AC).
+      return reply.code(400).send({ code: 'VALIDATION', message: 'message blocked by moderation', hits: moderationHits });
+    }
+    await deps.db.saveThankYou(id, record.body, record.state);
+    deps.tracker.track('thank_you_sent', (req as any).user?.id, { char_count: record.body.length });
+    return { status: 'queued', deliverWithin: `PT${Math.round(DELIVERY_SLA_MS / 3_600_000)}H` }; // AC: delivered within 1 hour
   });
 
   // ---- Safety: report pauses bill immediately ------------------------------
