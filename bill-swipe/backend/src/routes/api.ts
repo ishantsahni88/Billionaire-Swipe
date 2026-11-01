@@ -33,8 +33,9 @@ export function uploadStageToBillStatus(stage: UploadStage): BillStatus {
       return 'withdrawn';
   }
 }
+
 import { fundBill, InsufficientBalanceError, PartnerGateway, type PaymentLedgerRow } from '../services/payments';
-import { composeThankYou, DuplicateThankYouError, EmptyMessageError, DELIVERY_SLA_MS } from '../services/thankYou';
+import { composeThankYou, applyModerationVerdict, DuplicateThankYouError, EmptyMessageError, DELIVERY_SLA_MS, type ThankYouRecord, type ThankYouState } from '../services/thankYou';
 import { AnalyticsTracker } from '../services/analytics';
 import { canPay, createChallenge, verifyOtp, generateOtpCode, isOfAge, type KycStatus } from '../services/auth';
 import { buildDashboard, renderReceiptPdf } from '../services/dashboard';
@@ -57,6 +58,9 @@ export interface AppDeps {
     saveThankYou(paymentId: string, body: string, moderation: string): Promise<void>;
     /** Feature 6 duplicate rule needs prior messages for the payment (optional so old fakes stay valid) */
     thankYousForPayment?(paymentId: string): Promise<{ paymentId: string; body: string }[]>;
+    /** Ops moderation queue (Feature 6 review path). Optional: absent = queue empty / verdict unsupported. */
+    pendingModerationQueue?(): Promise<ThankYouRecord[]>;
+    setThankYouState?(id: string, state: ThankYouState): Promise<ThankYouRecord | null>;
     pauseBill(billId: string): Promise<void>;
     /** Feature 7: ledger rows for one payer (drives dashboard + receipts) */
     paymentsForPayer(payerId: string): Promise<PaymentLedgerRow[]>;
@@ -89,6 +93,13 @@ export interface AppDeps {
 }
 
 const FeeSchema = { platformFeeCents: 99 } as const;
+
+/** Look up a still-pending moderation record across the optional db seams. */
+async function findPendingRecord(deps: AppDeps, id: string): Promise<ThankYouRecord | null> {
+  const queue = await deps.db.pendingModerationQueue?.();
+  return queue?.find((r) => r.id === id && r.state === 'pending') ?? null;
+}
+
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -414,7 +425,49 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     }
     await deps.db.saveThankYou(id, record.body, record.state);
     deps.tracker.track('thank_you_sent', (req as any).user?.id, { char_count: record.body.length });
-    return { status: 'queued', deliverWithin: `PT${Math.round(DELIVERY_SLA_MS / 3_600_000)}H` }; // AC: delivered within 1 hour
+    return {
+      status: 'queued',
+      // Messages that tripped soft moderation rules wait for an ops verdict
+      // before the delivery job picks them up (queue: GET /v1/ops/thankyou/pending).
+      queuedForModeration: record.state === 'pending',
+      deliverWithin: `PT${Math.round(DELIVERY_SLA_MS / 3_600_000)}H`,
+    }; // AC: delivered within 1 hour
+  });
+
+  // ---- Feature 6 review path: ops moderation queue -------------------------
+  // Auto-moderation catches ~90%+ of bad notes at compose time; borderline
+  // hits land in state 'pending' and a human clears them here. Approving or
+  // rejecting is recorded against the SAME state machine as the service
+  // (applyModerationVerdict), so delivered text can never skip a verdict.
+  app.get('/v1/ops/thankyou/pending', async (req, reply) => {
+    if ((req as any).user?.role !== 'ops') return reply.code(403).send({ code: 'FORBIDDEN', message: 'ops only' });
+    const queue = (await deps.db.pendingModerationQueue?.()) ?? [];
+    // Identity-safe projection: payment id + body + age only. No holder fields.
+    return queue
+      .filter((r) => r.state === 'pending')
+      .map((r) => ({ id: r.id, paymentId: r.paymentId, body: r.body, createdAtMs: r.createdAtMs, deliverByMs: r.deliverByMs }));
+  });
+
+  app.post('/v1/ops/thankyou/:id/verdict', async (req, reply) => {
+    if ((req as any).user?.role !== 'ops') return reply.code(403).send({ code: 'FORBIDDEN', message: 'ops only' });
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const { approve } = z.object({ approve: z.boolean() }).parse(req.body);
+    if (!deps.db.setThankYouState) {
+      return reply.code(501).send({ code: 'VALIDATION', message: 'moderation store not configured' });
+    }
+    const prior = await findPendingRecord(deps, id);
+    if (!prior) return reply.code(404).send({ code: 'NOT_FOUND', message: 'pending message' });
+    // Reuse the service transition so illegal states (e.g. re-verdicting a
+    // delivered note) throw instead of silently corrupting the ledger of trust.
+    let next: ThankYouRecord;
+    try {
+      next = applyModerationVerdict(prior, approve);
+    } catch {
+      return reply.code(409).send({ code: 'VALIDATION', message: 'message already resolved' });
+    }
+    const saved = await deps.db.setThankYouState(id, next.state);
+    if (!saved) return reply.code(409).send({ code: 'VALIDATION', message: 'message already resolved' });
+    return { id, state: next.state };
   });
 
   // ---- Safety: report pauses bill immediately ------------------------------

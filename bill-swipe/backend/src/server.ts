@@ -21,6 +21,7 @@ import type { PublicBillCard } from '@bill-swipe/shared';
 import type { PaymentLedgerRow } from './services/payments.js';
 import type { SwipeRecord } from './services/feed.js';
 import type { Dispute } from './services/disputes.js';
+import type { ThankYouState } from './services/thankYou.js';
 
 export type MemoryDb = ReturnType<typeof memoryDb>;
 
@@ -30,7 +31,7 @@ function memoryDb(seedFeed: PublicBillCard[] = []) {
   const payments = new Map<string, PaymentLedgerRow>();
   const swipes = new Map<string, SwipeRecord & { id: string }>();
   const disputes: Dispute[] = [];
-  const thankYous: { paymentId: string; body: string; moderation: string }[] = [];
+  const thankYous: { id: string; paymentId: string; body: string; state: ThankYouState; createdAtMs: number; deliverByMs: number }[] = [];
   const paused = new Set<string>();
   let swipeSeq = 0;
   return {
@@ -42,8 +43,24 @@ function memoryDb(seedFeed: PublicBillCard[] = []) {
       return { id: c.id, amountCents: c.amountCents, fundedCents: c.fundedCents, status: c.status, category: c.category };
     },
     async insertPayment(row: unknown) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
-    async saveThankYou(paymentId: string, body: string, moderation: string) { thankYous.push({ paymentId, body, moderation }); },
+    async saveThankYou(paymentId: string, body: string, moderation: string) {
+      // Records carry an id + full state so the ops moderation queue can list
+      // and resolve 'pending' messages (Feature 6 review path).
+      thankYous.push({
+        id: crypto.randomUUID(), paymentId, body,
+        state: moderation as ThankYouState,
+        createdAtMs: Date.now(),
+        deliverByMs: Date.now() + 60 * 60_000, // PT1H delivery SLA
+      });
+    },
     async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
+    async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },
+    async setThankYouState(id: string, state: ThankYouState) {
+      const i = thankYous.findIndex((t) => t.id === id && t.state === 'pending');
+      if (i < 0) return null;
+      thankYous[i] = { ...thankYous[i], state };
+      return thankYous[i];
+    },
     async pauseBill(billId: string) { paused.add(billId); },
     async paymentsForPayer(payerId: string) { return [...payments.values()].filter((p) => p.payerId === payerId); },
     async getPayment(id: string) { return payments.get(id) ?? null; },
