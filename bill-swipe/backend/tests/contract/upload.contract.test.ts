@@ -24,7 +24,9 @@ const acctWords = [{ text: 'Account 123456789012', box }];
 
 function makeDeps() {
   const uploads = new Map<string, UploadRecord>();
-  const hashes = new Set<string>();
+  // Hashes of bills already SUBMITTED for review (bills.bill_hash UNIQUE).
+  // Drafts alone must not collide — the holder reviews a preview before submit.
+  const submittedHashes = new Set<string>();
   const published: PublicBillCard[] = [];
   const reviews: unknown[] = [];
   const gateway: PartnerGateway = {
@@ -32,7 +34,7 @@ function makeDeps() {
     async sendToBiller() { return { confirmation: 'C1' }; },
     async refund() {},
   };
-  const deps: AppDeps & { __uploads: typeof uploads; __hashes: typeof hashes; __published: typeof published; __reviews: typeof reviews } = {
+  const deps: AppDeps & { __uploads: typeof uploads; __hashes: typeof submittedHashes; __published: typeof published; __reviews: typeof reviews } = {
     paymentsLegallyApproved: false,
     gateway,
     tracker: new AnalyticsTracker({ ingest: () => {} }, 'salt'),
@@ -51,14 +53,21 @@ function makeDeps() {
       async removeSwipe() {},
       async insertDispute() {},
       async updatePayment() {},
-      async putUpload(rec) { uploads.set(rec.id, rec); hashes.add(rec.billHash); },
+      async putUpload(rec) {
+        uploads.set(rec.id, rec);
+        // Mirror production semantics: bill_hash is only inserted when the
+        // submission passes review (stage >= 'submitted'), never on draft.
+        if (rec.stage === 'submitted' || rec.stage === 'under_review' || rec.stage === 'published') {
+          submittedHashes.add(rec.billHash);
+        }
+      },
       async getUpload(id) { return uploads.get(id) ?? null; },
-      async knownBillHashes() { return new Set(hashes); },
+      async knownBillHashes() { return new Set(submittedHashes); },
       async priorSubmissions() { return []; },
       async publishBill(card) { published.push(card); },
       async insertReview(row) { reviews.push(row); },
     },
-    __uploads: uploads, __hashes: hashes, __published: published, __reviews: reviews,
+    __uploads: uploads, __hashes: submittedHashes, __published: published, __reviews: reviews,
   };
   return deps;
 }

@@ -14,8 +14,25 @@ import Fastify, { FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { moderateText, MAX_THANK_YOU_CHARS } from '@bill-swipe/shared';
-import type { PublicBillCard } from '@bill-swipe/shared';
+import type { PublicBillCard, BillStatus } from '@bill-swipe/shared';
 import { buildFeed, UNDO_WINDOW_MS, canUndo, type SwipeRecord } from '../services/feed';
+
+/** Map the upload draft lifecycle onto bills.status for the status timeline. */
+export function uploadStageToBillStatus(stage: UploadStage): BillStatus {
+  switch (stage) {
+    case 'draft':
+    case 'redacted_preview':
+    case 'submitted':
+    case 'under_review':
+      return 'pending_review';
+    case 'published':
+      return 'published';
+    case 'rejected':
+      return 'rejected';
+    case 'withdrawn':
+      return 'withdrawn';
+  }
+}
 import { fundBill, InsufficientBalanceError, PartnerGateway, type PaymentLedgerRow } from '../services/payments';
 import { AnalyticsTracker } from '../services/analytics';
 import { canPay, createChallenge, verifyOtp, generateOtpCode, isOfAge, type KycStatus } from '../services/auth';
@@ -23,7 +40,7 @@ import { buildDashboard, renderReceiptPdf } from '../services/dashboard';
 import { openDispute, reversePayment, republishDeadline } from '../services/disputes';
 import {
   createDraft, submitForReview, adjustRedaction,
-  DuplicateBillError, RedactionIncompleteError, type UploadRecord,
+  DuplicateBillError, RedactionIncompleteError, type UploadRecord, type UploadStage,
 } from '../services/upload';
 import { autoScreen, SECONDARY_DOC_THRESHOLD_CENTS, type BillSubmission } from '../services/verification';
 import { recordReview } from '../services/opsConsole';
@@ -194,10 +211,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     const body = z
       .object({
         checklist: z.object({
-          biller_legitimate: z.boolean(),
-          amount_matches: z.boolean(),
-          no_paid_stamp: z.boolean(),
-          identity_consistent: z.boolean(),
+          biller_legitimate: z.boolean().optional(),
+          amount_matches: z.boolean().optional(),
+          no_paid_stamp: z.boolean().optional(),
+          identity_consistent: z.boolean().optional(),
         }),
         secondaryDocProvided: z.boolean().default(false),
         amountCents: z.number().int().positive(),
@@ -211,6 +228,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // fingerprint and paid-stamp style hard flags are re-derived server-side.
     const prior = (await deps.db.priorSubmissions?.()) ?? [];
     void prior; void autoScreen; // full submission OCR payload lives on the bill row; route trusts submitted hardFlags
+    // Fail closed with 400 BEFORE the secondary-doc defaulting below: an
+    // incomplete checklist is a client error, never a crash (recordReview throws).
+    const REQUIRED_CHECKLIST = ['biller_legitimate', 'amount_matches', 'no_paid_stamp', 'identity_consistent'] as const;
+    const missing = REQUIRED_CHECKLIST.filter((k) => !(k in body.checklist));
+    if (missing.length) {
+      return reply.code(400).send({ code: 'VALIDATION', message: `incomplete checklist: missing ${missing.join(', ')}` });
+    }
     let recorded: ReturnType<typeof recordReview>;
     try {
       recorded = recordReview({
@@ -242,6 +266,29 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       deps.tracker.track('bill_rejected', reviewerId, { bill_id: id, rejection_reason: body.notes ?? 'checklist' });
     }
     return { decision: recorded.decision, reviewId: recorded.review.id };
+  });
+
+  // ---- Status timeline (Flow 1 step 8; shared StatusTimeline stages) --------
+  // Holder-only view of their own bill. Payers never get per-bill status with
+  // identity context — the feed card already carries `status` safely.
+  app.get('/v1/bills/:id/status', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const userId = (req as any).user?.id;
+    if (!userId) return reply.code(403).send({ code: 'FORBIDDEN', message: 'sign-in required' });
+    const rec = await deps.db.getUpload?.(id);
+    const bill = rec ? null : await deps.db.getBill(id);
+    if (rec && rec.holderId !== userId) return reply.code(404).send({ code: 'NOT_FOUND', message: 'bill' });
+    if (!rec && !bill) return reply.code(404).send({ code: 'NOT_FOUND', message: 'bill' });
+    const status = rec ? uploadStageToBillStatus(rec.stage) : (bill!.status as BillStatus);
+    const fundedCents = bill?.fundedCents ?? 0;
+    // Stages from PRD StatusTimeline: Uploaded -> Verified -> Funded -> Paid.
+    const stages = [
+      { key: 'uploaded', done: true },
+      { key: 'verified', done: ['verified', 'published', 'partially_funded', 'paid'].includes(status) },
+      { key: 'funded', done: ['partially_funded', 'paid'].includes(status) || fundedCents > 0 },
+      { key: 'paid', done: status === 'paid' },
+    ];
+    return { billId: id, status, stages };
   });
 
   // ---- Feature 3: feed -----------------------------------------------------
