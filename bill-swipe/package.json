@@ -1,0 +1,14 @@
+{
+  "name": "bill-swipe",
+  "version": "0.1.0",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "private": true,
+  "type": "module"
+}
