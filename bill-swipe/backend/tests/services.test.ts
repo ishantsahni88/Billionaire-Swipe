@@ -10,7 +10,7 @@ import { detectPii, redactionComplete, type OcrWord } from '../src/services/reda
 import { autoScreen, isDuplicate, decideReview, REVIEW_CHECKLIST, SECONDARY_DOC_THRESHOLD_CENTS, type BillSubmission } from '../src/services/verification';
 import { generatePayerHandle, holderDisplayName, regionOnly, toPublicBillCard, stripDigits, ANONYMOUS_DONOR_LINE } from '../src/services/anonymity';
 import { buildQueue, recordReview, shouldFlagHolder } from '../src/services/opsConsole';
-import { createChallenge, verifyOtp, generateOtpCode, hashOtp, isOfAge, canPay, MAX_OTP_ATTEMPTS, OTP_TTL_MS, LOCKOUT_MS } from '../src/services/auth';
+import { createChallenge, verifyOtp, generateOtpCode, hashOtp, isOfAge, canPay, MAX_OTP_ATTEMPTS, OTP_TTL_MS, LOCKOUT_MS, type OtpChallenge } from '../src/services/auth';
 import { MockPaymentPartner, MockKycProvider } from '../src/services/partnerMock';
 import { addBusinessDays, openDispute, reversePayment, republishDeadline, retentionDueMs } from '../src/services/disputes';
 import { buildDashboard, renderReceiptPdf } from '../src/services/dashboard';
@@ -217,9 +217,11 @@ describe('auth — OTP, lockout, age, KYC', () => {
     expect(last.outcome).toEqual({ ok: false, reason: 'locked' });
     cur = last.next;
     // even the RIGHT code fails while locked
-    expect(verifyOtp(cur, '123456', 'salt', now + 1000).outcome.reason).toBe('locked');
+    const whileLocked = verifyOtp(cur, '123456', 'salt', now + 1000);
+    expect(whileLocked.outcome).toEqual({ ok: false, reason: 'locked' });
     // after LOCKOUT_MS expires the correct code works again
-    expect(verifyOtp(cur, '123456', 'salt', now + 1000 + LOCKOUT_MS + 1).outcome.ok).toBe(true);
+    const unlocked = verifyOtp(cur, '123456', 'salt', now + 1000 + LOCKOUT_MS + 1);
+    expect(unlocked.outcome.ok).toBe(true);
   });
 
   it('expired codes are rejected', () => {
