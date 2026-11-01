@@ -44,7 +44,7 @@ function makeStatusDeps() {
       async swipes() { return []; },
       async getBill(id) { return billOverride && billOverride.id === id ? billOverride : published.get(id) ?? null; },
       async insertPayment() {},
-      async saveThankYou() {},
+      async saveThankYou(_rec: unknown) {},
       async pauseBill() {},
       async paymentsForPayer() { return []; },
       async getPayment() { return null; },

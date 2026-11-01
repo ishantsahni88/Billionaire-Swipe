@@ -13,6 +13,9 @@ export interface ModerationHit {
 
 export interface ModerationResult {
   allowed: boolean;
+  /** True when soft flags exist: message may be stored but NOT auto-delivered
+   *  without an ops verdict (Feature 6 review path). */
+  needsReview: boolean;
   hits: ModerationHit[];
 }
 
@@ -45,8 +48,12 @@ export function moderateText(text: string): ModerationResult {
   }
 
   const blocked = hits.some((h) => h.severity === 'block');
-  const flagged = hits.filter((h) => h.severity === 'flag').length >= 2;
-  return { allowed: !blocked && !flagged, hits };
+  // Any soft flag keeps the message ALLOWED but routes it to the ops review
+  // queue (state 'pending' in services/thankYou.ts). Feature 6 AC targets
+  // "90%+ of harassment and contact-info leaks" caught before delivery —
+  // a single address leak or one harassment term must never auto-deliver.
+  const hasFlags = hits.some((h) => h.severity === 'flag');
+  return { allowed: !blocked, hits, needsReview: hasFlags };
 }
 
 export function validateThankYou(body: string): ModerationResult & { lengthOk: boolean } {

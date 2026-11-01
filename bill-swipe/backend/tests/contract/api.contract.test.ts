@@ -54,9 +54,10 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
         return { id, amountCents: 24_050, fundedCents: 0, status: 'published', category: 'utility' };
       },
       async insertPayment(row) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
-      async saveThankYou(paymentId: string, body: string, moderation: string) {
-        const now = Date.now();
-        thankYous.push({ id: `ty-${++tySeq}`, paymentId, body, state: moderation as TyRec['state'], createdAtMs: now, deliverByMs: now + 3_600_000 });
+      async saveThankYou(rec: TyRec) {
+        // The fake store owns identity (seq-based ids, like a DB sequence);
+        // compose-time ids are placeholders and get replaced on insert.
+        thankYous.push({ ...rec, id: `ty-${++tySeq}` });
       },
       async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
       async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },

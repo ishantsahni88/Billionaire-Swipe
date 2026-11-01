@@ -44,7 +44,7 @@ function makeDeps() {
       async swipes() { return [] as SwipeRecord[]; },
       async getBill() { return null; },
       async insertPayment() {},
-      async saveThankYou() {},
+      async saveThankYou(_rec: unknown) {},
       async pauseBill() {},
       async paymentsForPayer(): Promise<PaymentLedgerRow[]> { return []; },
       async getPayment() { return null; },

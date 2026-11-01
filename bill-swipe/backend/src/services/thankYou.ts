@@ -27,6 +27,10 @@ export interface ThankYouRecord {
   deliverByMs: number;
 }
 
+/** Store-facing shape: `id` is assigned by the persistence layer (the store
+ *  owns identity), everything else comes from composeThankYou. */
+export type NewThankYouRecord = Omit<ThankYouRecord, 'id'>;
+
 export const DELIVERY_SLA_MS = 60 * 60_000; // PT1H
 
 export class DuplicateThankYouError extends Error {}
@@ -58,10 +62,14 @@ export function composeThankYou(opts: {
   }
   const mod = moderateText(trimmed);
   const record: ThankYouRecord = {
+    // In-memory default identity; real stores assign their own id on insert.
     id: opts.id ?? crypto.randomUUID(),
     paymentId: opts.paymentId,
     body: trimmed,
-    state: mod.allowed ? (mod.hits.length ? 'pending' : 'approved') : 'rejected',
+    // Three-way routing: block-severity hits are rejected outright (never
+    // stored for delivery); soft flags land in 'pending' for an ops verdict;
+    // clean messages are auto-approved and eligible for the 1h SLA delivery.
+    state: !mod.allowed ? 'rejected' : mod.needsReview ? 'pending' : 'approved',
     createdAtMs: nowMs,
     deliverByMs: nowMs + DELIVERY_SLA_MS,
   };

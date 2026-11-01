@@ -21,7 +21,7 @@ import type { PublicBillCard } from '@bill-swipe/shared';
 import type { PaymentLedgerRow } from './services/payments.js';
 import type { SwipeRecord } from './services/feed.js';
 import type { Dispute } from './services/disputes.js';
-import type { ThankYouState } from './services/thankYou.js';
+import type { ThankYouState, NewThankYouRecord } from './services/thankYou.js';
 
 export type MemoryDb = ReturnType<typeof memoryDb>;
 
@@ -43,14 +43,17 @@ function memoryDb(seedFeed: PublicBillCard[] = []) {
       return { id: c.id, amountCents: c.amountCents, fundedCents: c.fundedCents, status: c.status, category: c.category };
     },
     async insertPayment(row: unknown) { const r = row as PaymentLedgerRow; payments.set(r.id, r); },
-    async saveThankYou(paymentId: string, body: string, moderation: string) {
+    async saveThankYou(rec: NewThankYouRecord) {
       // Records carry an id + full state so the ops moderation queue can list
-      // and resolve 'pending' messages (Feature 6 review path).
+      // and resolve 'pending' messages (Feature 6 review path). The store owns
+      // identity; compose-time records arrive without one.
       thankYous.push({
-        id: crypto.randomUUID(), paymentId, body,
-        state: moderation as ThankYouState,
-        createdAtMs: Date.now(),
-        deliverByMs: Date.now() + 60 * 60_000, // PT1H delivery SLA
+        id: crypto.randomUUID(),
+        paymentId: rec.paymentId,
+        body: rec.body,
+        state: rec.state,
+        createdAtMs: rec.createdAtMs,
+        deliverByMs: rec.deliverByMs, // PT1H delivery SLA, computed at compose time
       });
     },
     async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },

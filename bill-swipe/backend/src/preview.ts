@@ -28,7 +28,7 @@ import { createDraft, submitForReview, type UploadRecord } from './services/uplo
 import type { PaymentLedgerRow } from './services/payments.js';
 import type { SwipeRecord } from './services/feed.js';
 import type { Dispute } from './services/disputes.js';
-import type { ThankYouState } from './services/thankYou.js';
+import type { ThankYouState, ThankYouRecord } from './services/thankYou.js';
 import type { PublicBillCard } from '@bill-swipe/shared';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -164,9 +164,9 @@ function demoDb() {
         payments.set(r.id, confirmed);
       }
     },
-    async saveThankYou(paymentId: string, body: string, moderation: string) {
-      thankYous.push({ id: uuid(), paymentId, body, state: moderation as ThankYouState,
-        createdAtMs: Date.now(), deliverByMs: Date.now() + 3_600_000 });
+    async saveThankYou(rec: ThankYouRecord) {
+      // Store owns identity on real backends; preview keeps the compose-time id.
+      thankYous.push({ ...rec });
     },
     async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
     async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },

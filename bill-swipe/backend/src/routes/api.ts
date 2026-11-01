@@ -35,7 +35,7 @@ export function uploadStageToBillStatus(stage: UploadStage): BillStatus {
 }
 
 import { fundBill, InsufficientBalanceError, PartnerGateway, type PaymentLedgerRow } from '../services/payments';
-import { composeThankYou, applyModerationVerdict, DuplicateThankYouError, EmptyMessageError, DELIVERY_SLA_MS, type ThankYouRecord, type ThankYouState } from '../services/thankYou';
+import { composeThankYou, applyModerationVerdict, DuplicateThankYouError, EmptyMessageError, DELIVERY_SLA_MS, type ThankYouRecord, type ThankYouState, type NewThankYouRecord } from '../services/thankYou';
 import { AnalyticsTracker } from '../services/analytics';
 import { canPay, createChallenge, verifyOtp, generateOtpCode, isOfAge, type KycStatus } from '../services/auth';
 import { buildDashboard, renderReceiptPdf } from '../services/dashboard';
@@ -55,7 +55,7 @@ export interface AppDeps {
     swipes(payerId: string): Promise<SwipeRecord[]>;
     getBill(id: string): Promise<{ id: string; amountCents: number; fundedCents: number; status: string; category: string } | null>;
     insertPayment(row: unknown): Promise<void>;
-    saveThankYou(paymentId: string, body: string, moderation: string): Promise<void>;
+    saveThankYou(record: NewThankYouRecord): Promise<void>;
     /** Feature 6 duplicate rule needs prior messages for the payment (optional so old fakes stay valid) */
     thankYousForPayment?(paymentId: string): Promise<{ paymentId: string; body: string }[]>;
     /** Ops moderation queue (Feature 6 review path). Optional: absent = queue empty / verdict unsupported. */
@@ -441,7 +441,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       // Blocked by moderation — never stored for delivery (Feature 6 AC).
       return reply.code(400).send({ code: 'VALIDATION', message: 'message blocked by moderation', hits: moderationHits });
     }
-    await deps.db.saveThankYou(id, record.body, record.state);
+    await deps.db.saveThankYou(record);
     deps.tracker.track('thank_you_sent', (req as any).user?.id, { char_count: record.body.length });
     return {
       status: 'queued',

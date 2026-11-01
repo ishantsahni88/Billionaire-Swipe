@@ -64,7 +64,10 @@ describe('Feature 6 — thank-you relay', () => {
   });
 
   it('resolved records are immutable to further verdicts (exactly one verdict per note)', () => {
-    const { record } = composeThankYou({ paymentId: 'p', body: 'Warm thanks.', nowMs: NOW });
+    // A soft-flagged note ("fake" trips the harassment flag) lands in 'pending',
+    // so a real verdict is legal exactly once.
+    const { record } = composeThankYou({ paymentId: 'p', body: 'Nothing fake about this gratitude.', nowMs: NOW });
+    expect(record.state).toBe('pending'); // keep test honest if moderation rules change
     const approved = applyModerationVerdict(record, true); // pending -> approved
     expect(approved.state).toBe('approved');
     // MVP rule: one message per payment => one verdict. Re-verdicting a
