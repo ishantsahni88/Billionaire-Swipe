@@ -56,4 +56,8 @@ export const api = {
     req<void>(cfg, 'POST', `/v1/bills/${billId}/report`, { reason }),
   dashboard: (cfg: ApiClientConfig) =>
     req<{ totalFundedCents: number; billsFunded: number; categories: string[] }>(cfg, 'GET', '/v1/payer/dashboard'),
+  // ---- User Flow 4: disputes ------------------------------------------------
+  // NOTE: type enum mirrors backend routes exactly (packages/shared/src/api.ts).
+  openDispute: (cfg: ApiClientConfig, billId: string, type: 'wrong_biller' | 'bill_already_paid' | 'scam' | 'charged_wrong_amount' | 'other', paymentId?: string) =>
+    req<{ id: string; state: string; dueBy: string }>(cfg, 'POST', '/v1/disputes', { billId, type, paymentId }),
 };

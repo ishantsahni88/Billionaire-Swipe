@@ -129,7 +129,9 @@ export function UploadScreen({ cfg }: { cfg: ApiClientConfig }) {
           <Text style={styles.caption}>
             Covered: {state.detectedKinds.length ? state.detectedKinds.join(', ') : 'nothing detected — tap anywhere to cover it yourself'}
           </Text>
-          <Image source={{ uri: state.redactedImageUrl }} style={styles.preview} accessibilityLabel="Your bill with personal details covered" />
+          {state.redactedImageUrl ? (
+            <Image source={{ uri: state.redactedImageUrl }} style={styles.preview} accessibilityLabel="Your bill with personal details covered" />
+          ) : null}
           {/* Gesture overlay maps taps -> addRedaction(box) in the real app */}
           <TouchableOpacity accessibilityRole="button" onPress={() => void addRedaction({ x: 0, y: 0, w: 120, h: 14 })}>
             <Text style={styles.pickLabel}>Tap the image to cover more</Text>

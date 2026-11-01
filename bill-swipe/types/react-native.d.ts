@@ -21,7 +21,9 @@ declare module 'react-native' {
   export const Text: React.FC<ViewProps & { numberOfLines?: number; onPress?: () => void }>;
   export interface PressableProps extends ViewProps { onPress?: () => void; disabled?: boolean; accessibilityState?: any; hitSlop?: number | { top?: number; bottom?: number; left?: number; right?: number }; }
   export const Pressable: React.FC<PressableProps>;
-  export const Image: React.FC<{ source: { uri: string } | number; style?: any; resizeMode?: string; alt?: string }>;
+  /** Deprecated in real RN but still widely used; declared as an alias of PressableProps. */
+  export const TouchableOpacity: React.FC<PressableProps & { activeOpacity?: number }>;
+  export const Image: React.FC<{ source: { uri: string } | number; style?: any; resizeMode?: string; alt?: string; accessibilityLabel?: string; testID?: string }>;
   export const ScrollView: React.FC<{ contentContainerStyle?: any; children?: React.ReactNode }>;
   export const ActivityIndicator: React.FC<{ style?: any; color?: string }>;
   export const TextInput: React.FC<any>;
