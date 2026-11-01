@@ -1,18 +1,22 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "jsx": "react-native",
     "types": ["node"],
     "paths": { "@bill-swipe/shared": ["./packages/shared/src/index.ts"] }
   },
   "include": [
+    "types/**/*.d.ts",
     "packages/shared/src/**/*.ts",
     "backend/src/**/*.ts",
-    "backend/tests/**/*.ts"
+    "backend/tests/**/*.ts",
+    "apps/mobile/src/**/*.ts",
+    "apps/mobile/src/**/*.tsx"
   ]
 }

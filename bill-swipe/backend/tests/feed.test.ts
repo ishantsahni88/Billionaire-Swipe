@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildFeed, canUndo, isUrgent, UNDO_WINDOW_MS, PASS_COOLDOWN_DAYS, type SwipeRecord } from '../src/services/feed';
-import type { PublicBillCard } from '../packages/shared/src/types';
+import type { PublicBillCard } from '@bill-swipe/shared';
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 10, 1); // Nov 1 2026
