@@ -170,12 +170,17 @@ function demoDb() {
     },
     async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
     async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },
+    async getThankYouById(id: string) { return thankYous.find((t) => t.id === id) ?? null; },
+    /** preview-only: full moderation list (all states) for the ops queue view */
+    _thankYous() { return [...thankYous]; },
     async setThankYouState(id: string, state: ThankYouState) {
       const i = thankYous.findIndex((t) => t.id === id && t.state === 'pending');
       if (i < 0) return null;
       thankYous[i] = { ...thankYous[i], state };
       return thankYous[i];
     },
+    /** preview-only delivery-worker seam: CAS approved -> delivered */
+    async casMarkDelivered(id: string) { return this.setThankYouState(id, 'delivered' as ThankYouState); },
     async pauseBill(billId: string) { paused.add(billId); },
     async paymentsForPayer(payerId: string) { return [...payments.values()].filter((p) => p.payerId === payerId); },
     async getPayment(id: string) { return payments.get(id) ?? null; },
@@ -293,6 +298,19 @@ async function main() {
     a.get('/v1/preview/payments', async (_req, reply) => {
       // Payer ids are internal; the holder needs *an* id to attach a thank-you.
       return db._payments().map((p) => ({ id: p.id, billId: p.billId, amountCents: p.amountCents, status: p.status }));
+    });
+    // Preview-only: run one delivery-worker tick so approved thank-yous move
+    // to 'delivered' on demand (production runs this on a schedule).
+    a.post('/v1/preview/deliver-tick', async (req, reply) => {
+      if ((req as any).user?.role !== 'ops') return reply.code(403).send({ code: 'FORBIDDEN', message: 'ops only' });
+      return runDeliveryTick(
+        {
+          async listByState(state) { return db._thankYous().filter((t) => t.state === state); },
+          casMarkDelivered: (id: string) => db.casMarkDelivered(id),
+        },
+        { notifyPayer: async () => {}, trackSent: () => {} },
+        Date.now(),
+      );
     });
     // Preview helper: this holder's own uploads (the status route already 404s
     // other people's drafts — this just lists ids for the demo UI).
