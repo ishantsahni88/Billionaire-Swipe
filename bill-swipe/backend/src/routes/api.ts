@@ -60,6 +60,10 @@ export interface AppDeps {
     thankYousForPayment?(paymentId: string): Promise<{ paymentId: string; body: string }[]>;
     /** Ops moderation queue (Feature 6 review path). Optional: absent = queue empty / verdict unsupported. */
     pendingModerationQueue?(): Promise<ThankYouRecord[]>;
+    /** Optional: full record by id, including RESOLVED states. When present,
+     *  the verdict route distinguishes 409 (already resolved) from 404
+     *  (never existed). Stores without it fall back to queue-only lookup. */
+    getThankYouById?(id: string): Promise<ThankYouRecord | null>;
     setThankYouState?(id: string, state: ThankYouState): Promise<ThankYouRecord | null>;
     pauseBill(billId: string): Promise<void>;
     /** Feature 7: ledger rows for one payer (drives dashboard + receipts) */
@@ -98,6 +102,33 @@ const FeeSchema = { platformFeeCents: 99 } as const;
 async function findPendingRecord(deps: AppDeps, id: string): Promise<ThankYouRecord | null> {
   const queue = await deps.db.pendingModerationQueue?.();
   return queue?.find((r) => r.id === id && r.state === 'pending') ?? null;
+}
+
+/** Resolve a moderation verdict with correct HTTP semantics:
+ *  - 404 when no such record exists at all
+ *  - 409 when the record exists but is already resolved/delivered (immutable)
+ *  - otherwise apply the transition through the service state machine. */
+async function resolveVerdict(
+  deps: AppDeps,
+  id: string,
+  approve: boolean,
+): Promise<{ ok: true; record: ThankYouRecord } | { ok: false; status: number; message: string }> {
+  let prior = await findPendingRecord(deps, id);
+  if (!prior && deps.db.getThankYouById) {
+    // Not in the pending queue — check the full store to tell 404 vs 409 apart.
+    const existing = await deps.db.getThankYouById(id);
+    if (!existing) return { ok: false, status: 404, message: 'thank-you message not found' };
+    return { ok: false, status: 409, message: 'message already resolved' };
+  }
+  if (!prior) return { ok: false, status: 404, message: 'thank-you message not pending' };
+  try {
+    const next = applyModerationVerdict(prior, approve);
+    const saved = await deps.db.setThankYouState!(id, next.state);
+    if (!saved) return { ok: false, status: 409, message: 'message already resolved' };
+    return { ok: true, record: saved };
+  } catch {
+    return { ok: false, status: 409, message: 'message already resolved' };
+  }
 }
 
 
@@ -468,24 +499,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   app.post('/v1/ops/thankyou/:id/verdict', async (req, reply) => {
     if ((req as any).user?.role !== 'ops') return reply.code(403).send({ code: 'FORBIDDEN', message: 'ops only' });
-    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    // NOTE: intentionally NOT z.string().uuid() — moderation-record ids come
+    // from the store's own sequence (e.g. DB-generated or test-fake ids), and
+    // an unknown id is answered with 404 by the lookup below regardless.
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(req.params);
     const { approve } = z.object({ approve: z.boolean() }).parse(req.body);
     if (!deps.db.setThankYouState) {
       return reply.code(501).send({ code: 'VALIDATION', message: 'moderation store not configured' });
     }
-    const prior = await findPendingRecord(deps, id);
-    if (!prior) return reply.code(404).send({ code: 'NOT_FOUND', message: 'pending message' });
     // Reuse the service transition so illegal states (e.g. re-verdicting a
     // delivered note) throw instead of silently corrupting the ledger of trust.
-    let next: ThankYouRecord;
-    try {
-      next = applyModerationVerdict(prior, approve);
-    } catch {
-      return reply.code(409).send({ code: 'VALIDATION', message: 'message already resolved' });
+    const outcome = await resolveVerdict(deps, id, approve);
+    if (!outcome.ok) {
+      return reply.code(outcome.status).send({
+        code: outcome.status === 404 ? 'NOT_FOUND' : 'CONFLICT',
+        message: outcome.message,
+      });
     }
-    const saved = await deps.db.setThankYouState(id, next.state);
-    if (!saved) return reply.code(409).send({ code: 'VALIDATION', message: 'message already resolved' });
-    return { id, state: next.state };
+    return { id, state: outcome.record.state };
   });
 
   // ---- Safety: report pauses bill immediately ------------------------------

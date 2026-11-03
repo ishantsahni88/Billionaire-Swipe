@@ -58,6 +58,7 @@ function memoryDb(seedFeed: PublicBillCard[] = []) {
     },
     async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
     async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },
+    async getThankYouById(id: string) { return thankYous.find((t) => t.id === id) ?? null; },
     async setThankYouState(id: string, state: ThankYouState) {
       const i = thankYous.findIndex((t) => t.id === id && t.state === 'pending');
       if (i < 0) return null;

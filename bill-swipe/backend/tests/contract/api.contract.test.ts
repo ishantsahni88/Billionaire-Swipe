@@ -61,6 +61,7 @@ function makeDeps(paymentsLegallyApproved: boolean, opts: { kyc?: 'not_started' 
       },
       async thankYousForPayment(paymentId: string) { return thankYous.filter((t) => t.paymentId === paymentId); },
       async pendingModerationQueue() { return thankYous.filter((t) => t.state === 'pending'); },
+      async getThankYouById(id: string) { return thankYous.find((t) => t.id === id) ?? null; },
       async setThankYouState(id: string, state: TyRec['state']) {
         const rec = thankYous.find((t) => t.id === id && t.state === 'pending');
         if (!rec) return null;
