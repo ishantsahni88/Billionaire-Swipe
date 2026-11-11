@@ -1,1 +1,1 @@
-# Billionaire-Swipe
+# Billionaire-Swipe :People upload verified unpaid bills to their profiles. Wealthy donors browse and choose: swipe right to cover the bill in full, swipe left to pass. A match means the debt is instantly paid off.
